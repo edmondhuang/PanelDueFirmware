@@ -345,6 +345,12 @@ enum ReceivedDataEvent
 	rcvStateMessageBoxSeq,
 	rcvStateMessageBoxTimeout,
 	rcvStateMessageBoxTitle,
+	rcvStateMessageBoxLimitMin,
+	rcvStateMessageBoxLimitMax,
+	rcvStateMessageBoxChoices,
+	rcvStateMessageBoxCancelButton,
+	rcvStateMessageBoxValueDefault,
+
 	rcvStateStatus,
 	rcvStateUptime,
 
@@ -452,8 +458,14 @@ static FieldTableEntry fieldTable[] =
 	{ rcvStateMessageBoxMessage,		"state:messageBox:message" },
 	{ rcvStateMessageBoxMode,			"state:messageBox:mode" },
 	{ rcvStateMessageBoxSeq,			"state:messageBox:seq" },
-	{ rcvStateMessageBoxTimeout,		"state:messageBox:timeout" },
+	{ rcvStateMessageBoxTimeout,			"state:messageBox:timeout" },
 	{ rcvStateMessageBoxTitle,			"state:messageBox:title" },
+	{ rcvStateMessageBoxLimitMin,			"state:messageBox:min" },
+	{ rcvStateMessageBoxLimitMax,			"state:messageBox:max" },
+	{ rcvStateMessageBoxChoices,			"state:messageBox:choices^" },
+	{ rcvStateMessageBoxCancelButton,		"state:messageBox:cancelButton" },
+	{ rcvStateMessageBoxValueDefault,		"state:messageBox:default" },
+
 	{ rcvStateStatus,					"state:status" },
 	{ rcvStateUptime,					"state:upTime" },
 
@@ -853,13 +865,13 @@ void SetBrightness(int percent)
 
 void CurrentAlertModeClear()
 {
-	currentAlert.mode = 0;
+	currentAlert.Reset();
 }
 
 static void ActivateScreensaver()
 {
-	if (currentAlert.mode == 2 ||
-	    currentAlert.mode == 3)
+	if (currentAlert.mode == Alert::Mode::InfoConfirm ||
+	    currentAlert.mode == Alert::Mode::ConfirmCancel)
 	{
 		return;
 	}
@@ -1008,7 +1020,7 @@ static void StartReceivedMessage()
 	newMessageSeq = messageSeq;
 	MessageLog::BeginNewMessage();
 	FileManager::BeginNewMessage();
-	currentAlert.flags.Clear();
+	currentAlert.Reset();
 
 	if (thumbnailContext.state == ThumbnailState::Init)
 	{
@@ -1037,6 +1049,17 @@ static void EndReceivedMessage()
 		MessageLog::DisplayNewMessage();
 	}
 	FileManager::EndReceivedMessage();
+
+	// alert event handling
+	if (currentAlert.flags.IsBitSet(Alert::GotMode) && currentAlert.mode == Alert::Mode::None)
+	{
+		UI::ClearAlert();
+	}
+	else if (currentAlert.mode != Alert::Mode::None && currentAlert.seq != lastAlertSeq)
+	{
+		UI::ProcessAlert(currentAlert);
+		lastAlertSeq = currentAlert.seq;
+	}
 
 	if (thumbnailContext.parseErr != 0 || thumbnailContext.err != 0)
 	{
@@ -1676,13 +1699,15 @@ static void ProcessReceivedValue(StringRef id, const char data[], const size_t i
 		break;
 
 	case rcvStateMessageBoxMode:
-		if (GetInteger(data, currentAlert.mode))
+		int32_t value;
+		if (GetInteger(data, value))
 		{
+			currentAlert.mode = static_cast<Alert::Mode>(value);
 			currentAlert.flags.SetBit(Alert::GotMode);
 		}
 		else
 		{
-			currentAlert.mode = 0;
+			currentAlert.mode = Alert::Mode::None;
 		}
 		break;
 
@@ -1703,6 +1728,46 @@ static void ProcessReceivedValue(StringRef id, const char data[], const size_t i
 	case rcvStateMessageBoxTitle:
 		currentAlert.title.copy(data);
 		currentAlert.flags.SetBit(Alert::GotTitle);
+		break;
+
+
+	case rcvStateMessageBoxLimitMin:
+		dbg("received limit min index %d data %s\r\n", indices[0], data);
+		{
+			GetInteger(data, currentAlert.limits.numberInt.min);
+			GetFloat(data, currentAlert.limits.numberFloat.min);
+			GetInteger(data, currentAlert.limits.text.min);
+		}
+		break;
+	case rcvStateMessageBoxLimitMax:
+		dbg("received limit max index %d data %s\r\n", indices[0], data);
+		{
+			GetInteger(data, currentAlert.limits.numberInt.max);
+			GetFloat(data, currentAlert.limits.numberFloat.max);
+			GetInteger(data, currentAlert.limits.text.max);
+		}
+		break;
+	case rcvStateMessageBoxValueDefault:
+		dbg("received value default index %d data %s\r\n", indices[0], data);
+		{
+			GetInteger(data, currentAlert.limits.numberInt.valueDefault);
+			GetFloat(data, currentAlert.limits.numberFloat.valueDefault);
+			currentAlert.limits.text.valueDefault.copy(data);
+		}
+		break;
+	case rcvStateMessageBoxCancelButton:
+		dbg("received cancel button index %d data %s\r\n", rde, indices[0], data);
+		GetBool(data, currentAlert.cancelButton);
+		break;
+	case rcvStateMessageBoxChoices:
+		dbg("received message box choice %d index %d data %s\r\n", rde, indices[0], data);
+		if (indices[0] >= ARRAY_SIZE(currentAlert.choices))
+		{
+			dbg("too many choices %d\n", indices[0]);
+			break;
+		}
+		currentAlert.choices[indices[0]].copy(data);
+		currentAlert.choices_count = indices[0] + 1;
 		break;
 
 	case rcvStateStatus:
@@ -2425,8 +2490,7 @@ int main(void)
 		}
 
 		// check for new alert
-		if (currentAlert.AllFlagsSet() &&
-		    currentAlert.mode >= 0 &&
+		if (currentAlert.mode != Alert::Mode::None &&
 		    currentAlert.seq != lastAlertSeq)
 		{
 			dbg("message updated last action time\n");
@@ -2508,17 +2572,6 @@ int main(void)
 			default:
 				break;
 			}
-		}
-
-		// alert event handling
-		if (currentAlert.flags.IsBitSet(Alert::GotMode) && currentAlert.mode < 0)
-		{
-			UI::ClearAlert();
-		}
-		else if (currentAlert.AllFlagsSet() && currentAlert.seq != lastAlertSeq)
-		{
-			UI::ProcessAlert(currentAlert);
-			lastAlertSeq = currentAlert.seq;
 		}
 
 		// refresh the display
